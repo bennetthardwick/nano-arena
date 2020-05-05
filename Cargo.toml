@@ -3,6 +3,8 @@ name = "nano_arena"
 version = "0.1.0"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
+license = "MIT"
+description = "A tiny arena allocator that uses atomics"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

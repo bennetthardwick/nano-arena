@@ -164,10 +164,6 @@ impl<T> Arena<T> {
         self.into()
     }
 
-    pub fn cleanup(&mut self) {
-        self.values.retain(|(idx, _)| idx.index().is_some())
-    }
-
     pub fn remove(&mut self, index: &Idx) -> T {
         if let Some(index) = index.borrow().index() {
             let (removed_index, value) = self.values.remove(index);
