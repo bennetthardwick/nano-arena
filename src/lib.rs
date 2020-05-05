@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+use std::iter::FromIterator;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -8,13 +10,36 @@ struct IdxInner {
     removed: AtomicBool,
 }
 
+impl IdxInner {
+    fn index(&self) -> Option<usize> {
+        let removed = self.removed.load(Ordering::Relaxed);
+        if !removed {
+            Some(self.index.load(Ordering::Relaxed))
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Idx {
     inner: Arc<IdxInner>,
 }
 
+impl Idx {
+    fn index(&self) -> Option<usize> {
+        self.inner.index()
+    }
+}
+
 pub struct Arena<T> {
     values: Vec<(Arc<IdxInner>, T)>,
+}
+
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Self { values: vec![] }
+    }
 }
 
 fn choose_second_member_of_tuple_mut<A, B>((_, value): &mut (A, B)) -> &mut B {
@@ -53,38 +78,71 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
+impl<T> FromIterator<T> for Arena<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Arena {
+            values: iter
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| (create_idx(index), value))
+                .collect(),
+        }
+    }
+}
+fn create_idx(index: usize) -> Arc<IdxInner> {
+    Arc::new(IdxInner {
+        index: AtomicUsize::new(index),
+        removed: AtomicBool::new(false),
+    })
+}
+
 impl<T> Arena<T> {
-    pub fn alloc(&mut self, value: T) -> Idx {
+    pub fn new() -> Arena<T> {
+        Self { values: vec![] }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Arena<T> {
+        Self {
+            values: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.values.capacity()
+    }
+
+    pub fn alloc_with_idx<F: FnOnce(Idx) -> T>(&mut self, func: F) -> Idx {
         let len = self.values.len();
-
-        let inner = Arc::new(IdxInner {
-            index: AtomicUsize::new(len),
-            removed: AtomicBool::new(false),
-        });
-
-        self.values.push((inner.clone(), value));
-
+        let inner = create_idx(len);
+        let idx = Idx {
+            inner: inner.clone(),
+        };
+        self.values.push((inner.clone(), func(idx)));
         Idx { inner }
     }
 
-    pub fn swap_remove(&mut self, index: &Idx) -> T {
-        let atomic_index = &index.inner;
+    pub fn alloc(&mut self, value: T) -> Idx {
+        let len = self.values.len();
+        let inner = create_idx(len);
+        self.values.push((inner.clone(), value));
+        Idx { inner }
+    }
 
-        if atomic_index.removed.load(Ordering::Relaxed) {
-            panic!("Trying to remove index that has already been removed!");
+    pub fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
+        index
+            .borrow()
+            .index()
+            .and_then(|index| self.values.get(index).and_then(|(_, value)| Some(value)))
+    }
+
+    pub fn get_mut<'a, I: Borrow<Idx>>(&'a mut self, index: I) -> Option<&'a mut T> {
+        if let Some(index) = index.borrow().index() {
+            self.values
+                .get_mut(index)
+                .and_then(|(_, value)| Some(value))
+        } else {
+            None
         }
-
-        let index = atomic_index.index.load(Ordering::Relaxed);
-
-        let (removed_index, value) = self.values.swap_remove(index);
-
-        if self.values.len() > 0 {
-            self.values[index].0.index.store(index, Ordering::Relaxed);
-        }
-
-        removed_index.removed.store(true, Ordering::Relaxed);
-
-        value
     }
 
     pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
@@ -106,24 +164,70 @@ impl<T> Arena<T> {
         self.into()
     }
 
-    pub fn remove(&mut self, index: &Idx) -> T {
-        let atomic_index = &index.inner;
+    pub fn cleanup(&mut self) {
+        self.values.retain(|(idx, _)| idx.index().is_some())
+    }
 
-        if atomic_index.removed.load(Ordering::Relaxed) {
+    pub fn remove(&mut self, index: &Idx) -> T {
+        if let Some(index) = index.borrow().index() {
+            let (removed_index, value) = self.values.remove(index);
+
+            for (index, (idx, _)) in self.values.iter().enumerate().skip(index) {
+                idx.index.store(index, Ordering::Relaxed);
+            }
+
+            removed_index.removed.store(true, Ordering::Relaxed);
+
+            value
+        } else {
             panic!("Trying to remove index that has already been removed!");
         }
+    }
 
-        let index = atomic_index.index.load(Ordering::Relaxed);
-
-        let (removed_index, value) = self.values.remove(index);
-
-        for (index, (idx, _)) in self.values.iter().enumerate().skip(index) {
-            idx.index.store(index, Ordering::Relaxed);
+    pub fn swap<A: Borrow<Idx>, B: Borrow<Idx>>(&mut self, a: A, b: B) {
+        if let Some((a_index, b_index)) = a
+            .borrow()
+            .index()
+            .and_then(|a| b.borrow().index().map(|b| (a, b)))
+        {
+            self.values.swap(a_index, b_index);
+            self.values[a_index]
+                .0
+                .index
+                .store(b_index, Ordering::Relaxed);
+            self.values[b_index]
+                .0
+                .index
+                .store(a_index, Ordering::Relaxed);
         }
+    }
 
-        removed_index.removed.store(true, Ordering::Relaxed);
+    pub fn apply_ordering<I>(&mut self, ordering: &Vec<Idx>) {
+        assert!(ordering.len() == self.values.len());
 
-        value
+        let mut old_arena = Arena::<T>::with_capacity(self.capacity());
+        std::mem::swap(&mut old_arena.values, &mut self.values);
+
+        for idx in ordering.iter() {
+            self.values
+                .push((create_idx(self.values.len()), old_arena.swap_remove(idx)))
+        }
+    }
+
+    pub fn swap_remove<I: Borrow<Idx>>(&mut self, index: I) -> T {
+        if let Some(index) = index.borrow().index() {
+            let (removed_index, value) = self.values.swap_remove(index);
+
+            if self.values.len() > 0 {
+                self.values[index].0.index.store(index, Ordering::Relaxed);
+            }
+
+            removed_index.removed.store(true, Ordering::Relaxed);
+
+            value
+        } else {
+            panic!("Trying to remove index that has already been removed!");
+        }
     }
 }
 
