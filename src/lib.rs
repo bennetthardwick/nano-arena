@@ -66,7 +66,7 @@ fn choose_second_member_of_tuple_ref<A, B>((_, value): &(A, B)) -> &B {
 
 pub struct IterMut<'a, T> {
     iterator: std::iter::Map<
-        std::slice::IterMut<'a, (std::sync::Arc<IdxInner>, T)>,
+        std::slice::IterMut<'a, (Arc<IdxInner>, T)>,
         &'a dyn Fn(&mut (Arc<IdxInner>, T)) -> &mut T,
     >,
 }
@@ -80,7 +80,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
 pub struct Iter<'a, T> {
     iterator: std::iter::Map<
-        std::slice::Iter<'a, (std::sync::Arc<IdxInner>, T)>,
+        std::slice::Iter<'a, (Arc<IdxInner>, T)>,
         &'a dyn Fn(&(Arc<IdxInner>, T)) -> &T,
     >,
 }
@@ -89,6 +89,42 @@ impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         self.iterator.next()
+    }
+}
+
+pub struct EntriesMut<'a, T> {
+    iterator: std::slice::IterMut<'a, (Arc<IdxInner>, T)>,
+}
+
+pub struct Entries<'a, T> {
+    iterator: std::slice::Iter<'a, (Arc<IdxInner>, T)>,
+}
+
+impl<'a, T> Iterator for EntriesMut<'a, T> {
+    type Item = (Idx, &'a mut T);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator.next().map(|(inner, value)| {
+            (
+                Idx {
+                    inner: inner.clone(),
+                },
+                value,
+            )
+        })
+    }
+}
+
+impl<'a, T> Iterator for Entries<'a, T> {
+    type Item = (Idx, &'a T);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator.next().map(|(inner, value)| {
+            (
+                Idx {
+                    inner: inner.clone(),
+                },
+                value,
+            )
+        })
     }
 }
 
@@ -187,6 +223,18 @@ impl<T> Arena<T> {
 
         if del > 0 {
             self.truncate(len - del);
+        }
+    }
+
+    pub fn entries<'a>(&'a self) -> Entries<'a, T> {
+        Entries {
+            iterator: self.values.iter(),
+        }
+    }
+
+    pub fn entries_mut<'a>(&'a mut self) -> EntriesMut<'a, T> {
+        EntriesMut {
+            iterator: self.values.iter_mut(),
         }
     }
 
