@@ -6,6 +6,10 @@ use std::sync::{
     Arc,
 };
 
+mod split;
+
+use split::ArenaSplit;
+
 struct IdxInner {
     index: AtomicUsize,
     removed: AtomicBool,
@@ -44,6 +48,11 @@ impl Hash for Idx {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::ptr::hash(self.inner.as_ref(), state)
     }
+}
+
+pub trait ArenaAccess<T> {
+    fn get<I: Borrow<Idx>>(&self, id: I) -> Option<&T>;
+    fn get_mut<I: Borrow<Idx>>(&mut self, id: I) -> Option<&mut T>;
 }
 
 pub struct Arena<T> {
@@ -179,25 +188,26 @@ impl<T> Arena<T> {
         self.alloc_with(|| value)
     }
 
-    pub fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
-        index
-            .borrow()
-            .value()
-            .and_then(|index| self.values.get(index).and_then(|(_, value)| Some(value)))
+    pub fn len(&self) -> usize {
+        self.values.len()
     }
 
-    pub fn get_mut<'a, I: Borrow<Idx>>(&'a mut self, index: I) -> Option<&'a mut T> {
-        if let Some(index) = index.borrow().value() {
-            self.values
-                .get_mut(index)
-                .and_then(|(_, value)| Some(value))
+    pub fn split_at<'a, I: Borrow<Idx>>(
+        &'a mut self,
+        selected: I,
+    ) -> Option<(&mut T, ArenaSplit<'a, T, Self>)> {
+        if let Some(value) = self.get_mut(selected.borrow()) {
+            Some((
+                unsafe { (value as *mut T).as_mut().unwrap() },
+                ArenaSplit {
+                    selected: selected.borrow().clone(),
+                    arena: self,
+                    __type: Default::default(),
+                },
+            ))
         } else {
             None
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.values.len()
     }
 
     pub fn truncate(&mut self, len: usize) {
@@ -347,6 +357,25 @@ impl<T> Arena<T> {
             value
         } else {
             panic!("Trying to remove index that has already been removed!");
+        }
+    }
+}
+
+impl<T> ArenaAccess<T> for Arena<T> {
+    fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
+        index
+            .borrow()
+            .value()
+            .and_then(|index| self.values.get(index).and_then(|(_, value)| Some(value)))
+    }
+
+    fn get_mut<I: Borrow<Idx>>(&mut self, index: I) -> Option<&mut T> {
+        if let Some(index) = index.borrow().value() {
+            self.values
+                .get_mut(index)
+                .and_then(|(_, value)| Some(value))
+        } else {
+            None
         }
     }
 }
@@ -626,5 +655,19 @@ mod tests {
         let mut arena = Arena::new();
         let idx = arena.alloc_with_idx(|id| Node { id });
         assert_eq!(arena.get(&idx).unwrap().id.value(), idx.value());
+    }
+
+    #[test]
+    fn split_at() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        let (j, mut arena) = arena.split_at(&julia).unwrap();
+
+        assert_eq!(j, "Julia");
+        assert!(arena.get_mut(john).is_some());
+        assert!(arena.get_mut(jane).is_some());
+        assert!(arena.get_mut(jake).is_some());
+
+        assert!(arena.get_mut(julia).is_none());
     }
 }
