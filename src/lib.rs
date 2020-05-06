@@ -33,9 +33,16 @@ impl Idx {
     }
 }
 
+impl Eq for Idx {}
+impl PartialEq for Idx {
+    fn eq(&self, rhs: &Idx) -> bool {
+        Arc::ptr_eq(&self.inner, &rhs.inner)
+    }
+}
+
 impl Hash for Idx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::ptr::hash(&self.inner, state)
+        std::ptr::hash(self.inner.as_ref(), state)
     }
 }
 
@@ -128,11 +135,12 @@ impl<T> Arena<T> {
         Idx { inner }
     }
 
+    pub fn alloc_with<F: FnOnce() -> T>(&mut self, func: F) -> Idx {
+        self.alloc_with_idx(|_| func())
+    }
+
     pub fn alloc(&mut self, value: T) -> Idx {
-        let len = self.values.len();
-        let inner = create_idx(len);
-        self.values.push((inner.clone(), value));
-        Idx { inner }
+        self.alloc_with(|| value)
     }
 
     pub fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
@@ -149,6 +157,36 @@ impl<T> Arena<T> {
                 .and_then(|(_, value)| Some(value))
         } else {
             None
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        let end = self.values.len();
+        let start = end - (end - len);
+
+        for i in (start..end).rev() {
+            self.remove_index(i);
+        }
+    }
+
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut f: F) {
+        let len = self.values.len();
+        let mut del = 0;
+
+        for i in 0..len {
+            if !f(&self.values[i].1) {
+                del += 1;
+            } else {
+                self.swap_index(i - del, i);
+            }
+        }
+
+        if del > 0 {
+            self.truncate(len - del);
         }
     }
 
@@ -171,20 +209,35 @@ impl<T> Arena<T> {
         self.into()
     }
 
-    pub fn remove(&mut self, index: &Idx) -> T {
+    fn remove_index(&mut self, index: usize) -> T {
+        let (removed_index, value) = self.values.remove(index);
+
+        for (index, (idx, _)) in self.values.iter().enumerate().skip(index) {
+            idx.index.store(index, Ordering::Relaxed);
+        }
+
+        removed_index.removed.store(true, Ordering::Relaxed);
+
+        value
+    }
+
+    pub fn remove<I: Borrow<Idx>>(&mut self, index: I) -> T {
         if let Some(index) = index.borrow().value() {
-            let (removed_index, value) = self.values.remove(index);
-
-            for (index, (idx, _)) in self.values.iter().enumerate().skip(index) {
-                idx.index.store(index, Ordering::Relaxed);
-            }
-
-            removed_index.removed.store(true, Ordering::Relaxed);
-
-            value
+            self.remove_index(index)
         } else {
             panic!("Trying to remove index that has already been removed!");
         }
+    }
+
+    #[cfg(test)]
+    fn get_index(&mut self, index: usize) -> &mut T {
+        &mut self.values[index].1
+    }
+
+    fn swap_index(&mut self, a: usize, b: usize) {
+        self.values.swap(a, b);
+        self.values[a].0.index.store(a, Ordering::Relaxed);
+        self.values[b].0.index.store(b, Ordering::Relaxed);
     }
 
     pub fn swap<A: Borrow<Idx>, B: Borrow<Idx>>(&mut self, a: A, b: B) {
@@ -193,40 +246,56 @@ impl<T> Arena<T> {
             .value()
             .and_then(|a| b.borrow().value().map(|b| (a, b)))
         {
-            self.values.swap(a_index, b_index);
-            self.values[a_index]
-                .0
-                .index
-                .store(b_index, Ordering::Relaxed);
-            self.values[b_index]
-                .0
-                .index
-                .store(a_index, Ordering::Relaxed);
+            self.swap_index(a_index, b_index);
         }
     }
 
-    pub fn apply_ordering<I>(&mut self, ordering: &Vec<Idx>) {
+    pub fn position<F: Fn(&T) -> bool>(&self, func: F) -> Option<Idx> {
+        for (inner, value) in self.values.iter() {
+            if func(value) {
+                return Some(Idx {
+                    inner: Arc::clone(&inner),
+                });
+            }
+        }
+
+        None
+    }
+
+    pub fn apply_ordering<I: Borrow<Idx>>(&mut self, ordering: &Vec<I>) {
         assert!(ordering.len() == self.values.len());
 
         let mut old_arena = Arena::<T>::with_capacity(self.capacity());
         std::mem::swap(&mut old_arena.values, &mut self.values);
 
         for idx in ordering.iter() {
-            self.values
-                .push((create_idx(self.values.len()), old_arena.swap_remove(idx)))
+            let new_index = self.values.len();
+            let old_index = idx.borrow().value().unwrap();
+
+            let (inner, value) = old_arena.swap_remove_index(old_index);
+
+            inner.index.store(new_index, Ordering::Relaxed);
+
+            self.values.push((inner, value));
+
+            idx.borrow().inner.index.store(new_index, Ordering::Relaxed);
         }
+    }
+
+    fn swap_remove_index(&mut self, index: usize) -> (Arc<IdxInner>, T) {
+        let (removed_index, value) = self.values.swap_remove(index);
+
+        if self.values.len() > 0 && index != self.values.len() {
+            self.values[index].0.index.store(index, Ordering::Relaxed);
+        }
+
+        (removed_index, value)
     }
 
     pub fn swap_remove<I: Borrow<Idx>>(&mut self, index: I) -> T {
         if let Some(index) = index.borrow().value() {
-            let (removed_index, value) = self.values.swap_remove(index);
-
-            if self.values.len() > 0 {
-                self.values[index].0.index.store(index, Ordering::Relaxed);
-            }
-
+            let (removed_index, value) = self.swap_remove_index(index);
             removed_index.removed.store(true, Ordering::Relaxed);
-
             value
         } else {
             panic!("Trying to remove index that has already been removed!");
@@ -248,8 +317,266 @@ impl<T> Into<Vec<T>> for Arena<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn setup_arena() -> (Arena<String>, Idx, Idx, Idx, Idx) {
+        let mut arena = Arena::new();
+
+        let john = arena.alloc("John".into());
+        let julia = arena.alloc("Julia".into());
+        let jane = arena.alloc("Jane".into());
+        let jake = arena.alloc("Jake".into());
+
+        (arena, john, julia, jane, jake)
+    }
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn should_construct_default() {
+        let arena: Arena<()> = Default::default();
+        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.capacity(), 0);
+    }
+
+    #[test]
+    fn should_construct_with_capacity() {
+        let arena: Arena<()> = Arena::with_capacity(100);
+        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.capacity(), 100);
+    }
+
+    #[test]
+    fn getting_by_index() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        assert_eq!(arena.get_index(0), "John");
+        assert_eq!(arena.get_index(1), "Julia");
+        assert_eq!(arena.get_index(2), "Jane");
+        assert_eq!(arena.get_index(3), "Jake");
+
+        assert_eq!(arena.get(john).unwrap(), "John");
+        assert_eq!(arena.get(julia).unwrap(), "Julia");
+        assert_eq!(arena.get(jane).unwrap(), "Jane");
+        assert_eq!(arena.get(jake).unwrap(), "Jake");
+    }
+
+    #[test]
+    fn arena_length() {
+        let (mut arena, _, _, _, _) = setup_arena();
+        assert_eq!(arena.len(), 4);
+        arena.alloc("Wow".into());
+        assert_eq!(arena.len(), 5);
+    }
+
+    #[test]
+    fn swap_indexes() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        assert_eq!(arena.get_index(0), "John");
+        assert_eq!(arena.get_index(1), "Julia");
+        assert_eq!(arena.get_index(2), "Jane");
+        assert_eq!(arena.get_index(3), "Jake");
+
+        assert_eq!(arena.get(&john).unwrap(), "John");
+        assert_eq!(arena.get(&julia).unwrap(), "Julia");
+        assert_eq!(arena.get(&jane).unwrap(), "Jane");
+        assert_eq!(arena.get(&jake).unwrap(), "Jake");
+
+        arena.swap(&john, &julia);
+        arena.swap(&jane, &jake);
+
+        assert_eq!(arena.get_index(0), "Julia");
+        assert_eq!(arena.get_index(1), "John");
+        assert_eq!(arena.get_index(2), "Jake");
+        assert_eq!(arena.get_index(3), "Jane");
+
+        assert_eq!(arena.get(&john).unwrap(), "John");
+        assert_eq!(arena.get(&julia).unwrap(), "Julia");
+        assert_eq!(arena.get(&jane).unwrap(), "Jane");
+        assert_eq!(arena.get(&jake).unwrap(), "Jake");
+    }
+
+    #[test]
+    fn remove() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        assert_eq!(arena.len(), 4);
+
+        arena.remove(&john);
+
+        assert!(arena.get(&john).is_none());
+        assert_eq!(arena.get(&julia).unwrap(), "Julia");
+        assert_eq!(arena.get(&jane).unwrap(), "Jane");
+        assert_eq!(arena.get(&jake).unwrap(), "Jake");
+
+        assert_eq!(arena.get_index(0), "Julia");
+        assert_eq!(arena.get_index(1), "Jane");
+        assert_eq!(arena.get_index(2), "Jake");
+    }
+
+    #[test]
+    fn swap_remove() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        assert_eq!(arena.len(), 4);
+
+        arena.swap_remove(&john);
+
+        assert!(arena.get(&john).is_none());
+        assert_eq!(arena.get(&julia).unwrap(), "Julia");
+        assert_eq!(arena.get(&jane).unwrap(), "Jane");
+        assert_eq!(arena.get(&jake).unwrap(), "Jake");
+
+        assert_eq!(arena.get_index(0), "Jake");
+        assert_eq!(arena.get_index(1), "Julia");
+        assert_eq!(arena.get_index(2), "Jane");
+    }
+
+    #[test]
+    fn remove_should_remove_last_value() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        assert_eq!(arena.len(), 4);
+
+        arena.swap_remove(&jake);
+        arena.remove(&jane);
+        arena.swap_remove(&julia);
+        arena.remove(&john);
+
+        assert_eq!(arena.len(), 0);
+    }
+
+    #[test]
+    fn convert_to_vec() {
+        let (arena, _, _, _, _) = setup_arena();
+        assert_eq!(arena.to_vec(), vec!["John", "Julia", "Jane", "Jake"]);
+    }
+
+    #[test]
+    fn index_should_be_hashable() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        let mut seen = std::collections::HashSet::<Idx>::new();
+
+        seen.insert(jake.clone());
+        assert!(seen.contains(&jake));
+        assert_eq!(jake.value().unwrap(), 3);
+
+        arena.remove(john);
+        arena.remove(julia);
+        arena.remove(jane);
+
+        assert_eq!(jake.value().unwrap(), 0);
+        assert!(seen.contains(&jake));
+    }
+
+    #[test]
+    fn cloned_index_should_equal() {
+        let (_, john, _, _, _) = setup_arena();
+
+        let a = john.clone();
+        let b = john;
+
+        assert!(a == b);
+    }
+
+    #[test]
+    fn apply_ordering() {
+        let (mut arena, john, julia, jane, jake) = setup_arena();
+
+        let ordering = vec![&jake, &julia, &john, &jane];
+
+        assert_eq!(arena.get_index(0), "John");
+        assert_eq!(arena.get_index(1), "Julia");
+        assert_eq!(arena.get_index(2), "Jane");
+        assert_eq!(arena.get_index(3), "Jake");
+
+        arena.apply_ordering(&ordering);
+
+        assert_eq!(arena.get_index(0), "Jake");
+        assert_eq!(arena.get_index(1), "Julia");
+        assert_eq!(arena.get_index(2), "John");
+        assert_eq!(arena.get_index(3), "Jane");
+
+        assert_eq!(arena.get(&john).unwrap(), "John");
+        assert_eq!(arena.get(&julia).unwrap(), "Julia");
+        assert_eq!(arena.get(&jane).unwrap(), "Jane");
+        assert_eq!(arena.get(&jake).unwrap(), "Jake");
+    }
+
+    #[test]
+    fn position() {
+        let (arena, _, julia, _, _) = setup_arena();
+
+        let j = arena.position(|v| v == "Julia").unwrap();
+
+        assert!(j == julia);
+    }
+
+    #[test]
+    fn truncate() {
+        let (mut arena, _, _, _, _) = setup_arena();
+        arena.truncate(0);
+        assert_eq!(arena.to_vec(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn retain() {
+        let (mut arena, _, _, _, _) = setup_arena();
+
+        arena.retain(|v| v == "Julia" || v == "Jane");
+
+        assert_eq!(arena.to_vec(), vec!["Julia", "Jane"]);
+    }
+
+    #[test]
+    fn mut_iter() {
+        let (mut arena, _, _, _, _) = setup_arena();
+
+        for val in arena.iter_mut() {
+            *val = "Wow".into();
+        }
+
+        assert_eq!(arena.to_vec(), vec!["Wow"; 4])
+    }
+
+    #[test]
+    fn iter() {
+        let (arena, _, _, _, _) = setup_arena();
+
+        let names = vec!["John", "Julia", "Jane", "Jake"];
+
+        for (a, b) in arena.iter().zip(names.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn turn_iterator_into_vector() {
+        let names = vec!["John", "Julia", "Jane", "Jake"];
+        let other_names = vec!["John", "Julia", "Jane", "Jake"];
+
+        let arena = names.into_iter().collect::<Arena<_>>();
+
+        for (a, b) in arena.iter().zip(other_names.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn get_mut() {
+        let (mut arena, john, _, _, _) = setup_arena();
+        *(arena.get_mut(&john).unwrap()) = "Not John".into();
+        assert_eq!(arena.get(&john).unwrap(), "Not John");
+    }
+
+    struct Node {
+        id: Idx,
+    }
+
+    #[test]
+    fn alloc_with_idx() {
+        let mut arena = Arena::new();
+        let idx = arena.alloc_with_idx(|id| Node { id });
+        assert_eq!(arena.get(&idx).unwrap().id.value(), idx.value());
     }
 }
