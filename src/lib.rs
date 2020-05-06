@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,8 +28,14 @@ pub struct Idx {
 }
 
 impl Idx {
-    fn index(&self) -> Option<usize> {
+    pub fn value(&self) -> Option<usize> {
         self.inner.index()
+    }
+}
+
+impl Hash for Idx {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(&self.inner, state)
     }
 }
 
@@ -131,12 +138,12 @@ impl<T> Arena<T> {
     pub fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
         index
             .borrow()
-            .index()
+            .value()
             .and_then(|index| self.values.get(index).and_then(|(_, value)| Some(value)))
     }
 
     pub fn get_mut<'a, I: Borrow<Idx>>(&'a mut self, index: I) -> Option<&'a mut T> {
-        if let Some(index) = index.borrow().index() {
+        if let Some(index) = index.borrow().value() {
             self.values
                 .get_mut(index)
                 .and_then(|(_, value)| Some(value))
@@ -165,7 +172,7 @@ impl<T> Arena<T> {
     }
 
     pub fn remove(&mut self, index: &Idx) -> T {
-        if let Some(index) = index.borrow().index() {
+        if let Some(index) = index.borrow().value() {
             let (removed_index, value) = self.values.remove(index);
 
             for (index, (idx, _)) in self.values.iter().enumerate().skip(index) {
@@ -183,8 +190,8 @@ impl<T> Arena<T> {
     pub fn swap<A: Borrow<Idx>, B: Borrow<Idx>>(&mut self, a: A, b: B) {
         if let Some((a_index, b_index)) = a
             .borrow()
-            .index()
-            .and_then(|a| b.borrow().index().map(|b| (a, b)))
+            .value()
+            .and_then(|a| b.borrow().value().map(|b| (a, b)))
         {
             self.values.swap(a_index, b_index);
             self.values[a_index]
@@ -211,7 +218,7 @@ impl<T> Arena<T> {
     }
 
     pub fn swap_remove<I: Borrow<Idx>>(&mut self, index: I) -> T {
-        if let Some(index) = index.borrow().index() {
+        if let Some(index) = index.borrow().value() {
             let (removed_index, value) = self.values.swap_remove(index);
 
             if self.values.len() > 0 {
