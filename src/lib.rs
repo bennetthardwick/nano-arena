@@ -192,6 +192,12 @@ impl<T> Arena<T> {
         self.values.len()
     }
 
+    pub fn get_idx_at_index(&self, index: usize) -> Option<Idx> {
+        self.values.get(index).map(|(inner, _)| Idx {
+            inner: Arc::clone(&inner),
+        })
+    }
+
     pub fn split_at<'a, I: Borrow<Idx>>(
         &'a mut self,
         selected: I,
@@ -287,11 +293,6 @@ impl<T> Arena<T> {
         }
     }
 
-    #[cfg(test)]
-    fn get_index(&mut self, index: usize) -> &mut T {
-        &mut self.values[index].1
-    }
-
     fn swap_index(&mut self, a: usize, b: usize) {
         self.values.swap(a, b);
         self.values[a].0.index.store(a, Ordering::Relaxed);
@@ -348,6 +349,11 @@ impl<T> Arena<T> {
         }
 
         (removed_index, value)
+    }
+
+    #[cfg(test)]
+    fn get_index(&mut self, index: usize) -> &mut T {
+        &mut self.values[index].1
     }
 
     pub fn swap_remove<I: Borrow<Idx>>(&mut self, index: I) -> T {
