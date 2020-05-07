@@ -31,6 +31,20 @@ pub struct Idx {
     inner: Arc<IdxInner>,
 }
 
+impl std::fmt::Debug for Idx {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        formatter.write_str(&format!(
+            "{}Idx ( {} )",
+            if self.inner.removed.load(Ordering::Relaxed) {
+                "Removed "
+            } else {
+                ""
+            },
+            self.inner.index.load(Ordering::Relaxed)
+        ))
+    }
+}
+
 impl Idx {
     pub fn value(&self) -> Option<usize> {
         self.inner.index()
@@ -675,5 +689,16 @@ mod tests {
         assert!(arena.get_mut(jake).is_some());
 
         assert!(arena.get_mut(julia).is_none());
+    }
+
+    #[test]
+    fn debug_printing() {
+        let (mut arena, john, _, _, _) = setup_arena();
+
+        assert_eq!(format!("{:?}", john), "Idx ( 0 )");
+
+        arena.swap_remove(&john);
+
+        assert_eq!(format!("{:?}", john), "Removed Idx ( 0 )");
     }
 }
