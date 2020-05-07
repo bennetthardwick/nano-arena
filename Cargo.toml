@@ -9,3 +9,6 @@ description = "A tiny arena allocator that uses atomics"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[badges]
+travis-ci = { repository = "https://github.com/bennetthardwick/nano-arena" }
