@@ -12,3 +12,14 @@ description = "A tiny arena allocator that uses atomics"
 
 [badges]
 travis-ci = { repository = "https://github.com/bennetthardwick/nano-arena" }
+
+[dev-dependencies]
+criterion = "0.3.2"
+
+[[bench]]
+name = "benches"
+path = "benches/benches.rs"
+harness = false
+
+[profile.bench]
+debug = true

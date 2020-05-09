@@ -64,10 +64,7 @@ impl Hash for Idx {
     }
 }
 
-pub trait ArenaAccess<T> {
-    fn get<I: Borrow<Idx>>(&self, id: I) -> Option<&T>;
-    fn get_mut<I: Borrow<Idx>>(&mut self, id: I) -> Option<&mut T>;
-}
+const DEFAULT_CAPACITY: usize = 4;
 
 pub struct Arena<T> {
     values: Vec<(Arc<IdxInner>, T)>,
@@ -75,7 +72,7 @@ pub struct Arena<T> {
 
 impl<T> Default for Arena<T> {
     fn default() -> Self {
-        Self { values: vec![] }
+        Self::new()
     }
 }
 
@@ -162,6 +159,7 @@ impl<T> FromIterator<T> for Arena<T> {
         }
     }
 }
+#[inline]
 fn create_idx(index: usize) -> Arc<IdxInner> {
     Arc::new(IdxInner {
         index: AtomicUsize::new(index),
@@ -171,7 +169,7 @@ fn create_idx(index: usize) -> Arc<IdxInner> {
 
 impl<T> Arena<T> {
     pub fn new() -> Arena<T> {
-        Self { values: vec![] }
+        Self::with_capacity(DEFAULT_CAPACITY)
     }
 
     pub fn with_capacity(capacity: usize) -> Arena<T> {
@@ -184,6 +182,7 @@ impl<T> Arena<T> {
         self.values.capacity()
     }
 
+    #[inline]
     pub fn alloc_with_idx<F: FnOnce(Idx) -> T>(&mut self, func: F) -> Idx {
         let len = self.values.len();
         let inner = create_idx(len);
@@ -194,10 +193,17 @@ impl<T> Arena<T> {
         Idx { inner }
     }
 
+    #[inline]
     pub fn alloc_with<F: FnOnce() -> T>(&mut self, func: F) -> Idx {
         self.alloc_with_idx(|_| func())
     }
 
+    #[inline]
+    pub fn insert(&mut self, value: T) -> Idx {
+        self.alloc(value)
+    }
+
+    #[inline]
     pub fn alloc(&mut self, value: T) -> Idx {
         self.alloc_with(|| value)
     }
@@ -215,7 +221,7 @@ impl<T> Arena<T> {
     pub fn split_at<'a, I: Borrow<Idx>>(
         &'a mut self,
         selected: I,
-    ) -> Option<(&mut T, ArenaSplit<'a, T, Self>)> {
+    ) -> Option<(&mut T, ArenaSplit<'a, T>)> {
         if let Some(value) = self.get_mut(selected.borrow()) {
             Some((
                 unsafe { (value as *mut T).as_mut().unwrap() },
@@ -379,17 +385,15 @@ impl<T> Arena<T> {
             panic!("Trying to remove index that has already been removed!");
         }
     }
-}
 
-impl<T> ArenaAccess<T> for Arena<T> {
-    fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
+    pub fn get<I: Borrow<Idx>>(&self, index: I) -> Option<&T> {
         index
             .borrow()
             .value()
             .and_then(|index| self.values.get(index).and_then(|(_, value)| Some(value)))
     }
 
-    fn get_mut<I: Borrow<Idx>>(&mut self, index: I) -> Option<&mut T> {
+    pub fn get_mut<I: Borrow<Idx>>(&mut self, index: I) -> Option<&mut T> {
         if let Some(index) = index.borrow().value() {
             self.values
                 .get_mut(index)
@@ -431,7 +435,7 @@ mod tests {
     fn should_construct_default() {
         let arena: Arena<()> = Default::default();
         assert_eq!(arena.len(), 0);
-        assert_eq!(arena.capacity(), 0);
+        assert_eq!(arena.capacity(), DEFAULT_CAPACITY);
     }
 
     #[test]
