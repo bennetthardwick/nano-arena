@@ -76,10 +76,12 @@ impl<T> Default for Arena<T> {
     }
 }
 
+#[inline]
 fn choose_second_member_of_tuple_mut<A, B>((_, value): &mut (A, B)) -> &mut B {
     value
 }
 
+#[inline]
 fn choose_second_member_of_tuple_ref<A, B>((_, value): &(A, B)) -> &B {
     value
 }

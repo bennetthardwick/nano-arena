@@ -11,6 +11,18 @@ fn insert<T: Default>(n: usize) {
     let mut arena = Arena::<T>::new();
     for _ in 0..n {
         let idx = arena.insert(Default::default());
+        arena.swap_remove(idx);
+        let idx = arena.insert(Default::default());
+        criterion::black_box(idx);
+    }
+}
+
+fn insert_and_delete<T: Default>(n: usize) {
+    let mut arena = Arena::<T>::new();
+    for _ in 0..n {
+        let idx = arena.insert(Default::default());
+        arena.swap_remove(idx);
+        let idx = arena.insert(Default::default());
         criterion::black_box(idx);
     }
 }
